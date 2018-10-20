@@ -176,6 +176,7 @@ EThread::schedule_spawn(Continuation *c, int ev, void *cookie)
 TS_INLINE EThread *
 this_ethread()
 {
+  // 直接调用 this_thread() 并进行类型转换
   return (EThread *)this_thread();
 }
 

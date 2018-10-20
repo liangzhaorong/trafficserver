@@ -102,12 +102,15 @@ EThread::~EThread()
   // delete[]l1_hash;
 }
 
+// 判断该 EThread 是否支持处理的指定类型的 event
 bool
 EThread::is_event_type(EventType et)
 {
   return (event_types & (1 << static_cast<int>(et))) != 0;
 }
 
+// EThread 的 event_types 成员是一个按位操作的状态值，可通过该
+// 方法让一个 EThread 同时处理多种类型的 event.
 void
 EThread::set_event_type(EventType et)
 {
@@ -118,35 +121,53 @@ void
 EThread::process_event(Event *e, int calling_code)
 {
   ink_assert((!e->in_the_prot_queue && !e->in_the_priority_queue));
+  // 尝试获取锁
   MUTEX_TRY_LOCK(lock, e->mutex, this);
+  // 判断是否拿到锁
   if (!lock.is_locked()) {
+    // 如果没有拿到锁，则把 event 重新丢回外部本地队列
     e->timeout_at = cur_time + DELAY_FOR_RETRY;
     EventQueueExternal.enqueue_local(e);
+    // 返回到 execute()
   } else {
+    // 如果拿到了锁，首先判断当前 event 是否已经取消
     if (e->cancelled) {
+      // 如果被取消了，则释放 event
       free_event(e);
+      // 返回到 execute()
       return;
     }
+    // 准备回调 Cont->handleEvent
     Continuation *c_temp = e->continuation;
+    // 注意：在回调期间，Cont->mutex 是被当前 EThread 锁定的
     // Make sure that the contination is locked before calling the handler
     e->continuation->handleEvent(calling_code, e);
     ink_assert(!e->in_the_priority_queue);
     ink_assert(c_temp == e->continuation);
+    // 提前释放锁
     MUTEX_RELEASE(lock);
+    // 如果该 event 是周期性执行的，通过 schedule_every 添加
     if (e->period) {
+      // 不在保护队列，也不在优先级队列（就是既不在外部队列，也不在内部队列）
+      //   通常在调用 process_event 之前从队列中 dequeue 了，就应该不会在队列里了
+      //   但是，在 Cont->handleEvent 可能会调用了其他操作导致 event 被重新放回队列
       if (!e->in_the_prot_queue && !e->in_the_priority_queue) {
         if (e->period < 0) {
+          // 小于零表示这是一个隐性队列内的 event，不用对 timeout_at 的值进行重新计算
           e->timeout_at = e->period;
         } else {
+          // 对下一次执行时间 timeout_at 的值进行重新计算
           this->get_hrtime_updated();
           e->timeout_at = cur_time + e->period;
           if (e->timeout_at < cur_time) {
             e->timeout_at = cur_time;
           }
         }
+        // 将重新设置好 timeout_at 的 event 放入外部本地队列
         EventQueueExternal.enqueue_local(e);
       }
     } else if (!e->in_the_prot_queue && !e->in_the_priority_queue) {
+      // 不是周期性 event，也不在保护队列，又不在优先级队列，则释放 event
       free_event(e);
     }
   }
@@ -157,27 +178,40 @@ EThread::process_queue(Que(Event, link) * NegativeQueue, int *ev_count, int *nq_
 {
   Event *e;
 
+  // 将事件从外部队列中安全的移动到本地队列
   // Move events from the external thread safe queues to the local queue.
   EventQueueExternal.dequeue_external();
 
   // execute all the available external events that have
   // already been dequeued
+  // 遍历: 外部本地队列
+  // dequeue_local() 方法每次从外部本地队列取出一个事件
   while ((e = EventQueueExternal.dequeue_local())) {
     ++(*ev_count);
+    // 事件被异步取消时
     if (e->cancelled) {
       free_event(e);
+    // 立即执行的事件
     } else if (!e->timeout_at) { // IMMEDIATE
       ink_assert(e->period == 0);
+      // 通过 process_event 回调状态机
       process_event(e, e->callback_event);
+    // 周期执行的事件
     } else if (e->timeout_at > 0) { // INTERVAL
+      // 放入内部队列
       EventQueue.enqueue(e, cur_time);
+    // 负事件
     } else { // NEGATIVE
       Event *p = nullptr;
       Event *a = NegativeQueue->head;
+      // 注意这里 timeout_at 的值是小于 0 的负数
+      // 按照从小到大的顺序排列
+      // 如果遇到相同的值，则后插入的事件在前面
       while (a && a->timeout_at > e->timeout_at) {
         p = a;
         a = a->link.next;
       }
+      // 放入隐性队列（负队列）
       if (!a) {
         NegativeQueue->enqueue(e);
       } else {
@@ -208,6 +242,7 @@ EThread::execute_regular()
   static EventMetrics METRIC_INIT;
 
   // give priority to immediate events
+  // 设计目的：优先处理立即执行的事件
   for (;;) {
     if (unlikely(shutdown_event_system == true)) {
       return;
@@ -230,46 +265,76 @@ EThread::execute_regular()
 
     process_queue(&NegativeQueue, &ev_count, &nq_count);
 
+    // 遍历：内部队列（优先级队列）
     bool done_one;
     do {
       done_one = false;
       // execute all the eligible internal events
+      // check_ready 方法将优先级队列内的多个子队列进行重排（reschedule）
+      // 使每个子队列容纳的事件的执行时间符合每一个子队列的要求
       EventQueue.check_ready(cur_time, this);
+      // dequeue_ready 方法只操作 0 号子队列，这里面的事件需要在 5ms 内执行
       while ((e = EventQueue.dequeue_ready(cur_time))) {
         ink_assert(e);
         ink_assert(e->timeout_at > 0);
         if (e->cancelled) {
           free_event(e);
         } else {
+          // 本次循环处理了一个事件，设置 done_one 为 true，表示继续遍历内部队列
           done_one = true;
           process_event(e, e->callback_event);
         }
       }
+      /* 
+       * 每次循环都会把 0 号子队列里面的事件全部处理完
+       * 如果本次对 0 号子队列的遍历至少处理了一个事件，那么
+       *   这个处理过程是会花掉时间的，但是事件若是被取消了则不会花掉多少时间，所以不记录在内；
+       *   此时，1 号子队列里面的事件可能已经到了需要执行的时间，
+       *   或者，1 号子队列里面的事件已经超时了，
+       * 所以要通过 do - while(done_one) 循环来再次整理优先级队列,
+       *   然后再次处理 0 号子队列，以保证事件的按时执行.
+       * 如果本次循环一个事件都没有处理，
+       *   那就说明在整理队列之后，0 号子队列仍然是空队列，
+       *   这表示内部队列中最近一个需要执行的事件在 5ms 之后
+       *   那就不再需要对内部队列进行遍历，结束 do-while(done_one) 循环
+       * 注意：此处或许有一个假设，那就是每个 REGULAR ETHREAD 的大循环，运行时间为 5ms，
+       *   如果一次循环的时间超过了 5ms，内部队列的事件就可能会超时.
+       */
     } while (done_one);
 
     // execute any negative (poll) events
+    // 遍历：隐性队列（如果隐性队列不为空的话）
     if (NegativeQueue.head) {
       process_queue(&NegativeQueue, &ev_count, &nq_count);
 
       // execute poll events
+      // 执行隐性队列里的 polling 事件，每次取一个事件，通过 process_event 呼叫状态机，目前：
+      // 对于 TCP，状态机是 NetHandler::mainNetEvent
+      // 对于 UDP，状态机是 PollCont::pollEvent
       while ((e = NegativeQueue.dequeue())) {
         process_event(e, EVENT_POLL);
       }
     }
 
+    // 没有负事件，那就是只有周期性事件需要执行，那么此时就需要节省 CPU 资源避免空转
+    // 通过内部队列里最早需要执行事件的时间距离当前时间的差值，得到可以休眠的时间
     next_time             = EventQueue.earliest_timeout();
     ink_hrtime sleep_time = next_time - Thread::get_hrtime_updated();
     if (sleep_time > 0) {
+      // 将该休眠时间与最大休眠时间比较后取小的
       sleep_time = std::min(sleep_time, HRTIME_MSECONDS(thread_max_heartbeat_mseconds));
       ++(current_metric->_wait);
     } else {
       sleep_time = 0;
     }
 
+    // 触发 signals，向其它线程通知事件
+    // 该方法有可能会阻塞
     if (n_ethreads_to_be_signalled) {
       flush_signals(this);
     }
 
+    // 阻塞等待 sleep_time
     tail_cb->waitForActivity(sleep_time);
 
     // loop cleanup
@@ -308,15 +373,26 @@ EThread::execute_regular()
 // into the queue.
 //
 
+/**
+ * EThread::execute() 由 switch 语句分成多个部分：
+ *   - 第一部分是 REGULAR 类型的处理
+ *       - 它是一个无限循环内的代码，持续扫描/遍历多个队列，并回调 Event 内部 Cont 的 handler
+ *   - 第二部分是 DEDICATED 类型的处理
+ */
+
 void
 EThread::execute()
 {
   // Do the start event first.
   // coverity[lock]
+  // 在进行任何调度之前调用的初始事件
   if (start_event) {
+    // 获取锁
     MUTEX_TAKE_LOCK_FOR(start_event->mutex, this, start_event->continuation);
     start_event->continuation->handleEvent(EVENT_IMMEDIATE, start_event);
+    // 释放锁
     MUTEX_UNTAKE_LOCK(start_event->mutex, this);
+    // 释放该事件
     free_event(start_event);
     start_event = nullptr;
   }

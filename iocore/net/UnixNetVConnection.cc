@@ -595,6 +595,7 @@ UnixNetVConnection::outstanding()
 VIO *
 UnixNetVConnection::do_io_read(Continuation *c, int64_t nbytes, MIOBuffer *buf)
 {
+  // 如果 c 为 NULL，则 nbytes 必须为 0(是关闭读、写 do_io 调用方式其中的一种)
   if (closed && !(c == nullptr && nbytes == 0 && buf == nullptr)) {
     Error("do_io_read invoked on closed vc %p, cont %p, nbytes %" PRId64 ", buf %p", this, c, nbytes, buf);
     return nullptr;
@@ -611,6 +612,7 @@ UnixNetVConnection::do_io_read(Continuation *c, int64_t nbytes, MIOBuffer *buf)
       read.vio.reenable();
     }
   } else {
+    // buf 为 NULL 时会关闭读
     read.vio.buffer.clear();
     read.enabled = 0;
   }
@@ -1175,18 +1177,28 @@ UnixNetVConnection::mainEvent(int event, Event *e)
     signal_timeout_at = &next_activity_timeout_at;
   }
 
+  /* 
+   * 强制设置以下两个值为 NULL 和 0，此处应该是一个 hack
+   *    因为在此处上面有一处详细计算这两个值的代码
+   */
   *signal_timeout    = nullptr;
   *signal_timeout_at = 0;
+  // 先把 WRITE vio 的回调状态机保存到本地临时变量
   writer_cont        = write.vio.cont;
 
+  // 如果 NetVConnection 已经设置为关闭，那么就回收资源，然后返回
   if (closed) {
     nh->free_netvc(this);
     return EVENT_DONE;
   }
 
+  // 如果 READ vio 是读操作，并且没有半关闭读
   if (read.vio.op == VIO::READ && !(f.shutdown & NET_VC_SHUTDOWN_READ)) {
+    // 保存 READ vio 的回调状态机到本地临时变量
     reader_cont = read.vio.cont;
+    // signal_event 在前面的部分被设置为了 VC_EVENT_INACTIVITY_TIMEOUT 或 VC_EVENT_ACTIVE_TIMEOUT 回调状态机超时信号
     if (read_signal_and_update(signal_event, this) == EVENT_DONE) {
+      // 如果该 NetVConnection 关闭了，就立即返回
       return EVENT_DONE;
     }
   }

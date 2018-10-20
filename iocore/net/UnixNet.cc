@@ -215,6 +215,12 @@ net_signal_hook_callback(EThread *thread)
 void
 initialize_thread_for_net(EThread *thread)
 {
+  /*
+   * 这里是一个特殊的 new 的用法，new ( Buffer ) ClassName(Parameter) 表示：
+   *   在指定地址：由 get_NetHandler(thread) 返回
+   *   然后以 NetHandler() 方式调用构造函数，完成初始化
+   *   ink_dummy_for_new 在 I_EThread.h 中定义为一个空 class
+   */
   NetHandler *nh = get_NetHandler(thread);
 
   new ((ink_dummy_for_new *)nh) NetHandler();

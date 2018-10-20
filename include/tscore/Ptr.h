@@ -220,10 +220,12 @@ Ptr<T>::operator=(T *p)
 
   m_ptr = p;
 
+  // 引用计数加 1，其实就是 p 的引用计数加 1
   if (m_ptr) {
     m_ptr->refcount_inc();
   }
 
+  // m_ptr 之前指向的上一个对象的引用计数减 1，若变为 0，则释放
   if (temp_ptr && temp_ptr->refcount_dec() == 0) {
     temp_ptr->free();
   }

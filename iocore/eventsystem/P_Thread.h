@@ -39,11 +39,24 @@
 TS_INLINE void
 Thread::set_specific()
 {
+  // 把当前对象（this）关联到 key
   ink_thread_setspecific(Thread::thread_data_key, this);
 }
 
+/**
+ * 关于 this_thread()
+ *   - 返回当前 Thread 对象
+ *   - 由于 EThread 继承自 Thread，因此
+ *       - 在 EThread 中调用 this_thread() 返回的是 EThread 对象
+ *       - 但是返回值的类型仍然是 Thread *
+ *       - 为了提供正确的返回值类型，在 EThread 中又定义了 this_ethread() 方法
+ * 
+ * 使用同一个 key，在不同的线程中，获得的数据是不同的，同样的，绑定的数据也只与
+ * 当前线程关联。因此，对 thread specific 相关函数的调用是与其所在的线程紧密相关的。
+ */
 TS_INLINE Thread *
 this_thread()
 {
+  // 通过 key 取回之前关联的对象
   return (Thread *)ink_thread_getspecific(Thread::thread_data_key);
 }

@@ -76,6 +76,7 @@ class UnixNetVConnection;
 class UnixUDPConnection;
 struct DNSConnection;
 struct NetAccept;
+// 向 poll fd 添加文件句柄，以及修改 fd 事件状态
 struct EventIO {
   int fd = -1;
 #if TS_USE_KQUEUE || TS_USE_EPOLL && !defined(USE_EDGE_TRIGGER) || TS_USE_PORT
@@ -90,10 +91,27 @@ struct EventIO {
     NetAccept *na;
     UnixUDPConnection *uc;
   } data;
+  // 在需要将一个文件描述符以及文件描述符的延伸（NetVC, UDPVC, DNSConn, NetAccpet）添加到
+  // PollDescriptor 时，可以通过 EventIO 提供的 start 方法
   int start(EventLoop l, DNSConnection *vc, int events);
+    // type = EVENTIO_DNS_CONNECTION
   int start(EventLoop l, NetAccept *vc, int events);
+    // type = EVENTIO_NETACCEPT
   int start(EventLoop l, UnixNetVConnection *vc, int events);
+    // type = EVENTIO_READWRITE_VC
   int start(EventLoop l, UnixUDPConnection *vc, int events);
+    // type = EVENTIO_UDP_CONNECTION
+  /*
+   * 上述四个方法，都会设置成员 type 的值，最终都是调用如下的基础方法.
+   * 这个基础方法是支持多种 IO Poll 平台，如：epoll，kqueue，port
+   * 这个方法通常不应该被直接调用，因为这个方法没有对 type 进行设置
+   * 
+   * 参数说明：
+   *   - EventLoop 实际是 poll fd 的封装 PollDescriptor
+   *   - Continuation 则用于回调
+   *   - events 表示所关注的事件，通常应该使用：EVENTIO_READ, EVENTIO_WRITE, EVENTIO_ERROR 
+   *     三者之一或者它们的'或'值
+   */
   int start(EventLoop l, int fd, Continuation *c, int events);
   // Change the existing events by adding modify(EVENTIO_READ)
   // or removing modify(-EVENTIO_READ), for level triggered I/O
@@ -154,14 +172,43 @@ extern int http_accept_port_number;
 unsigned int net_next_connection_number();
 
 struct PollCont : public Continuation {
+  /*
+   * 指向此 PollCont 的上层状态机 NetHandler
+   * 可以理解为 Event 中的 Continuation 成员
+   *     由于一个 PollCont 中的所有 EventIO 的上层状态机都是同一个 NetHandler
+   *     因此，把这个 NetHandler 的对象直接放在了 PollCont 中 
+   */
   NetHandler *net_handler;
+  // Poll 描述符封装，主要描述符，用来保存 epoll fd 等
   PollDescriptor *pollDescriptor;
+  // Poll 描述符封装，但是这个主要用于 UDP 在 EAGAIN 错误时的子状态机 UDPReadContinuation
+  // 在这个状态机中只使用了 pfd[] 和 nfds
   PollDescriptor *nextPollDescriptor;
+  /*
+   * 由构造函数初始化，在 pollEvent() 方法内使用
+   * 但是如果 net_handler 不为空，则会在每次调用 pollEvent() 时，
+   *     按一定规则重置为 0 或者 net_config_poll_timeout
+   */
   int poll_timeout;
 
+  /*
+   * 构造函数
+   * 该构造函数用于 UDPPollCont
+   * 此时成员 net_handler == NULL，那么 pollEvent() 就不会重置 poll_timeout
+   * 在 ATS 所有代码中，pt 参数没有显式传入过，因此总是使用默认值
+   */
   PollCont(Ptr<ProxyMutex> &m, int pt = net_config_poll_timeout);
+  /*
+   * 该构造函数用于 PollCont
+   * 此时成员 net_handler 被初始化为 nh
+   *     但是在 PollCont 的使用中，并未引用过 PollCont 内的 net_handler 成员
+   *     从 pollEvent() 的设计来看，原本应该是在 NetHandler::mainNetEvent 中调用 pollEvent()
+   *     但是抽象设计好像不太成功，在 NetHandler::mainNetEvent 重新实现了一遍 pollEvent() 的逻辑
+   * 在 ATS 所有代码中，pt 参数没有显式传入过，因此总是使用默认值
+   */
   PollCont(Ptr<ProxyMutex> &m, NetHandler *nh, int pt = net_config_poll_timeout);
   ~PollCont() override;
+  // 事件处理函数，实际是对 do_poll 的封装
   int pollEvent(int, Event *);
   void do_poll(ink_hrtime timeout);
 };
@@ -357,9 +404,11 @@ private:
   static int update_nethandler_config(const char *name, RecDataT, RecData data, void *);
 };
 
+// 封装了专门获取 NetHandler 的操作
 static inline NetHandler *
 get_NetHandler(EThread *t)
 {
+  // 使用宏定义构造指针
   return (NetHandler *)ETHREAD_GET_PTR(t, unix_netProcessor.netHandler_offset);
 }
 static inline PollCont *
@@ -553,6 +602,10 @@ EventIO::start(EventLoop l, UnixUDPConnection *vc, int events)
   type = EVENTIO_UDP_CONNECTION;
   return start(l, vc->fd, (Continuation *)vc, events);
 }
+
+// 该方法用于关闭 fd，首先调用 stop 方法停止 polling，然后根据 type 的类型，
+// 调用该类型的 close 方法完成 fd 的关闭
+// 但是 close 只负责关闭 DNS, NetAccpet, VC 三种类型，对于 UDP，则不可以调用 close 方法，这是为什么？
 TS_INLINE int
 EventIO::close()
 {
@@ -588,6 +641,8 @@ EventIO::start(EventLoop l, int afd, Continuation *c, int e)
 #ifndef USE_EDGE_TRIGGER
   events = e;
 #endif
+  // 最后调用 epoll_ctl 把 ev 添加到 epoll fd 的事件池中，然后可以通过 epoll_wait 获取结果
+  // 在 ev 中包含了指向该 EventIO 实例的指针，在每一个 UnixNetVConnection 里都有一个 EventIO 类型的成员
   return epoll_ctl(event_loop->epoll_fd, EPOLL_CTL_ADD, fd, &ev);
 #endif
 #if TS_USE_KQUEUE
@@ -738,6 +793,7 @@ EventIO::stop()
     struct epoll_event ev;
     memset(&ev, 0, sizeof(struct epoll_event));
     ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    // 通过 epoll_ctl 从 epoll fd 中删除 fd
     retval    = epoll_ctl(event_loop->epoll_fd, EPOLL_CTL_DEL, fd, &ev);
 #endif
 #if TS_USE_PORT
@@ -745,6 +801,7 @@ EventIO::stop()
     Debug("iocore_eventio", "[EventIO::stop] %d[%s]=port_dissociate(%d,%d,%d)", retval, retval < 0 ? strerror(errno) : "ok",
           event_loop->port_fd, PORT_SOURCE_FD, fd);
 #endif
+    // 设置 event_loop 为 NULL，因为所有的操作都是通过 epoll fd 进行，这里把 event_loop 设置为 NULL，就相当于没有了 epoll fd
     event_loop = nullptr;
     return retval;
   }

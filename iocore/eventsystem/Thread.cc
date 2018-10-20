@@ -47,6 +47,12 @@ static bool initialized ATS_UNUSED = ([]() -> bool {
 })();
 }
 
+/**
+ * - 用于初始化 mutex
+ * - 并且上锁
+ * - 线程总是保持对其自身 mutex 的锁定
+ * - 这样凡是复用线程 mutex 对象，则相当于被线程永久锁定，成为只属于此线程的本地对象
+ */
 Thread::Thread()
 {
   mutex = new_ProxyMutex();
@@ -76,15 +82,19 @@ spawn_thread_internal(void *a)
 {
   auto *p = static_cast<thread_data_internal *>(a);
 
+  // 将 Thread 对象 p->me 通过 key 设置为当前线程的特有数据
   p->me->set_specific();
   ink_set_thread_name(p->name);
 
+  // 若函数指针 f 不为 NULL，则调用 f
   if (p->f) {
     p->f();
   } else {
+    // 否则执行线程的默认运行函数
     p->me->execute();
   }
 
+  // 返回后释放对象 p
   delete p;
   return nullptr;
 }
@@ -92,12 +102,16 @@ spawn_thread_internal(void *a)
 void
 Thread::start(const char *name, void *stack, size_t stacksize, ThreadFunction const &f)
 {
+  // 为当前线程的上下文分配内存并初始化
   auto *p = new thread_data_internal{f, this, ""};
 
+  // 线程的名字
   ink_zero(p->name);
   ink_strlcpy(p->name, name, MAX_THREAD_NAME_LENGTH);
+  // 若没有指定线程的栈大小，则使用默认的栈大小
   if (stacksize == 0) {
     stacksize = DEFAULT_STACKSIZE;
   }
+  // 创建线程时，传入 spawn_thread_internal 函数，这样线程启动会立即调用该函数
   ink_thread_create(&tid, spawn_thread_internal, p, 0, stacksize, stack);
 }

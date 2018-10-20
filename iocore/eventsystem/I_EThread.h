@@ -46,6 +46,23 @@ class ServerSessionPool;
 class Event;
 class Continuation;
 
+/**
+ * ATS 可以创建两种类型的 EThread 线程：
+ *   - DEDICATED 类型
+ *       - 该类型的线程，在执行完成某个 Continuation 后，就消亡了
+ *       - 换句话说，这个类型只处理/执行一个 Event，在创建这种类型的 EThread 时就要传入 Event。
+ *       - 或者是处理一个独立的任务，例如 NetAccept 的 Continuation 就是通过此种类型来执行的。
+ *   - REGULAR 类型
+ *       - 该类型的线程，在 ATS 启动后，就一直存在着，它的线程执行函数：execute() 是一个死循环
+ *       - 该类型的线程维护了一个事件池，当事件池不为空时，线程就从事件池中取出事件（Event），
+ *         同时执行事件（Event）封装的 Continuation。
+ *       - 当需要调度某个线程执行某个 Continuation 时，通过 EventProcessor 将一个 Continuation 
+ *         封装成一个事件（Event）并将其加入到线程的事件池中。
+ *       - 这个类型是 EventSystem 的核心，它会处理很多的 Event，而且可以从外部传入 Event，然后
+ *         让这个 EThread 处理/执行 Event。
+ * 
+ * 在创建一个 EThread 实例之前就要决定它的类型，创建之后就不能更改了。
+ */
 enum ThreadType {
   REGULAR = 0,
   DEDICATED,
@@ -55,11 +72,14 @@ extern bool shutdown_event_system;
 
 /**
   Event System specific type of thread.
+  事件系统特定类型的线程。
 
   The EThread class is the type of thread created and managed by
   the Event System. It is one of the available interfaces for
   schedulling events in the event system (another two are the Event
   and EventProcessor classes).
+  EThread 类是由 Event System 创建和管理的线程类型。它是 Event System 
+  为调度事件而提供的接口之一（另两个是 Event 和 EventProcessor 类）.
 
   In order to handle events, each EThread object has two event
   queues, one external and one internal. The external queue is
@@ -67,16 +87,56 @@ extern bool shutdown_event_system;
   that particular thread. Since it can be accessed by other threads
   at the same time, operations using it must proceed in an atomic
   fashion.
-
+  为了处理事件，每个 EThread 对象都有两个事件队列，一个是外部而一个是内部。
+  外部队列提供给 EThread（用户）以便用户将事件添加到特定线程。由于它可以
+  被多个线程同时访问，因此使用它时必须以原子方式进行。
+  
   The internal queue, in the other hand, is used exclusively by the
   EThread to process timed events within a certain time frame. These
   events are queued internally and they may come from the external
   queue as well.
+  另一方面，内部队列专门用于由 EThread 处理在一定时间框架内的定时事件。
+  这些事件在内部被排队，也可能包含来自外部队列的事件。
+
+  为了处理事件，每个 EThread 实例实际上有四个事件队列：
+    - 外部队列（EventQueueExternal 被声明为 EThread 的成员，是一个保护队列）
+        - 让 EThread 的调用者，能够追加事件到该特定的线程
+        - 由于它同时可以被其他线程访问，所以对它的操作必须保持原子性
+    - 本地队列（外部队列的子队列）
+        - 外部队列是满足原子操作的，可以批量导入本地队列
+        - 本地队列只能被当前线程访问，不支持原子操作
+    - 内部队列（EventQueue 被声明为 EThread 的成员，是一个优先级队列）
+        - 在另一方面，专门用于由 EThread 处理在一定时间框架内的定时事件
+        - 这些事件在内部被排队
+        - 也可能包含来自外部队列的事件（本地队列内符合条件的事件会进入到内部队列）
+    - 隐性队列（NegativeQueue 被声明为 execute() 函数的局部变量）
+        - 由于是局部变量，不可被外部直接操作，所以称之为隐性队列
+        - 通常只有 epoll_wait 的事件出现在这个队列里
 
   Scheduling Interface:
 
   There are eight schedulling functions provided by EThread and
   they are a wrapper around their counterparts in EventProcessor.
+
+  调度界面：
+  EThread 提供了 8 个调度函数（其实是 9 个，但是有一个 _signal 除了 IOCore 内部使用，
+  其它地方都用不到）。
+  以下方法把 Event 放入当前的 EThread 线程的外部队列：
+    - schedule_imm
+    - schedule_imm_signal
+        - 专为网络模块设计
+        - 一个线程可能一直阻塞在 epoll_wait 上，通过引入一个 pipe 或着 eventfd，当调度
+          一个线程执行某个 event 时，异步通知该线程从 epoll_wait 解放出来。
+    - schedule_at
+    - schedule_in
+    - schedule_every
+  上述 5 个方法最后都会调用 schedule() 的公共部分。
+  以下方法功能与上面的相同，只是它们直接把 Event 放入内部队列
+    - schedule_imm_local
+    - schedule_at_local
+    - schedule_in_local
+    - schedule_every_local
+  上述 4 个方法最后都会调用 schedule_local() 的公共部分。
 
   @see EventProcessor
   @see Event
@@ -295,42 +355,62 @@ public:
   |  UNIX Interface                                         |
   \*-------------------------------------------------------*/
 
+  // 基本构造函数，初始化 thread_private，同时成员 tt 初始化为 REGULAR，
+  // 成员 id 初始化为 NO_ETHREAD_ID
   EThread();
+  // 增加对 ethreads_to_be_signalled 的初始化，同时成员 tt 初始化为 att 的值，
+  // 同时成员 tt 初始化为 att 的值，成员 id 初始化为 anid 的值
   EThread(ThreadType att, int anid);
+  // 专用于 DEDICATED 类型的构造函数，成员 tt 初始化为 att 的值，oneevent 初始化指向 e
   EThread(ThreadType att, Event *e);
   EThread(const EThread &) = delete;
   EThread &operator=(const EThread &) = delete;
+  // 析构函数，刷新 signal，并释放 ethreads_to_be_signalled
   ~EThread() override;
 
   Event *schedule(Event *e, bool fast_signal = false);
 
+  // 线程内部数据，用于保存如：统计系统的数组
   /** Block of memory to allocate thread specific data e.g. stat system arrays. */
   char thread_private[PER_THREAD_DATA];
 
+  // 连接到 Disk Processor 以及与之配合的 AIO 队列
   /** Private Data for the Disk Processor. */
   DiskHandler *diskHandler = nullptr;
 
   /** Private Data for AIO. */
   Que(Continuation, link) aio_ops;
 
+  // 外部事件队列：保护队列
   ProtectedQueue EventQueueExternal;
+  // 内部事件队列：优先级队列
   PriorityEventQueue EventQueue;
 
+  // 当 schedule 操作时，如果设置 signal 为 true 则需要触发信号通知该 Event 的 EThread
+  // 但是当无法获得目标 EThread 的锁，就不能立即发送信号，因此只能先将该线程挂在这里
+  // 在空闲时刻进行通知。
+  // 这个指针数组的长度不会超过线程总数，当达到线程总数的时候，会转换为直接映射表。
   EThread **ethreads_to_be_signalled = nullptr;
   int n_ethreads_to_be_signalled     = 0;
 
   static constexpr int NO_ETHREAD_ID = -1;
+  // 从 0 开始的线程 id，在 EventProcessor::start 中 new EThread 时设置
   int id                             = NO_ETHREAD_ID;
+  // 事件类型，如：ET_NET, ET_SSL 等，通常用于设置该 EThread 仅处理指定类型的事件
+  // 该值仅由 is_event_type 读取，set_event_type 写入
   unsigned int event_types           = 0;
   bool is_event_type(EventType et);
   void set_event_type(EventType et);
 
   // Private Interface
 
+  // 事件处理机主函数
   void execute() override;
   void execute_regular();
   void process_queue(Que(Event, link) * NegativeQueue, int *ev_count, int *nq_count);
+  // 处理事件（Event），回调 Cont->handleEvent
   void process_event(Event *e, int calling_code);
+  // 释放事件（Event），回收资源
   void free_event(Event *e);
   LoopTailHandler *tail_cb = &DEFAULT_TAIL_HANDLER;
 
@@ -341,14 +421,20 @@ public:
 #endif
   EventIO *ep = nullptr;
 
+  // EThread 类型：REGULAR, DEDICATED
   ThreadType tt = REGULAR;
   /** Initial event to call, before any scheduling.
+      在任何调度之前调用的初始事件。
 
       For dedicated threads this is the only event called.
       For regular threads this is called first before the event loop starts.
       @internal For regular threads this is used by the EventProcessor to get called back after
       the thread starts but before any other events can be dispatched to provide initializations
       needed for the thread.
+      对于 dedicated 线程，这是唯一被调用的事件。
+      对于 regular 线程，则在事件循环开始前首先调用它。
+      @internal 对于 regular 线程，EventProcessor 使用它在线程启动后但在调度任何其他 event 前调用，
+      以提供线程所需的初始化。
   */
   Event *start_event = nullptr;
 
@@ -470,8 +556,10 @@ operator new(size_t, ink_dummy_for_new *p)
 {
   return (void *)p;
 }
+// 该宏定义用来返回给定线程内，线程私有数据中特定 offset 位置为起点的指针
 #define ETHREAD_GET_PTR(thread, offset) ((void *)((char *)(thread) + (offset)))
 
+// 用于获取当前 EThread 实例的指针
 extern EThread *this_ethread();
 
 extern int thread_max_heartbeat_mseconds;

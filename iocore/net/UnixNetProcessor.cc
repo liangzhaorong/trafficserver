@@ -298,6 +298,7 @@ UnixNetProcessor::init()
 {
   EventType etype = ET_NET;
 
+  // 通过 allocate 分配线程私有数据空间，获得偏移量
   netHandler_offset = eventProcessor.allocate(sizeof(NetHandler));
   pollCont_offset   = eventProcessor.allocate(sizeof(PollCont));
 

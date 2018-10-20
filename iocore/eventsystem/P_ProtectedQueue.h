@@ -43,9 +43,14 @@ ProtectedQueue::ProtectedQueue()
 TS_INLINE void
 ProtectedQueue::signal()
 {
+  /*
+   * 首先以阻塞方式获取锁
+   * 然后触发 cond_signal
+   * 最后释放锁
+   */
   // Need to get the lock before you can signal the thread
   ink_mutex_acquire(&lock);
-  ink_cond_signal(&might_have_data);
+  ink_cond_signal(&might_have_data);  
   ink_mutex_release(&lock);
 }
 
@@ -53,11 +58,13 @@ TS_INLINE int
 ProtectedQueue::try_signal()
 {
   // Need to get the lock before you can signal the thread
+  // 尝试获得锁，如果获得锁，则返回 1，表示成功执行 signal 操作
   if (ink_mutex_try_acquire(&lock)) {
     ink_cond_signal(&might_have_data);
     ink_mutex_release(&lock);
     return 1;
   } else {
+    // 否则，没有获得锁，返回 0
     return 0;
   }
 }

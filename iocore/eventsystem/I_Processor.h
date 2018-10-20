@@ -52,6 +52,19 @@ class Thread;
    common case to have a single instance in that application scope.
 
 */
+/*
+ * 在 ATS 的 IO Core 中，针对每一种功能，都定义了 Processor，这些 Processor
+ * 都是继承自 Processor 基类，如：
+ *   - EventProcessor
+ *   - tasksProcessor
+ *   - netProcessor
+ *   - sslProcessor
+ *   - dnsProcessor
+ *   - cacheProcessor
+ *   - clusterProcessor
+ *   - hostProcessor
+ *   - UDPNetProcessor(udpNet)
+ */
 class Processor
 {
 public:

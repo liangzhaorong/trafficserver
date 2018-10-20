@@ -141,14 +141,46 @@ typedef struct tsapi_vio *TSVIO;
 
 /**
   Base class for the connection classes that provide IO capabilities.
+  VConnection 是所有提供 IO 功能的 connection 类的基类，自身无法实现功能，
+  必须通过派生类实现具体功能.
 
   The VConnection class is an abstract representation of a uni or
   bi-directional data conduit returned by a Processor. In a sense,
   they serve a similar purpose to file descriptors. A VConnection
   is a pure base class that defines methods to perform stream IO.
   It is also a Continuation that is called back from processors.
+  VConnection 类是由 Processor 返回的一种单向或双向数据管道的抽象描述。
+  在某种意义上，与文件描述符的功能相似。根本上来说，VConnection 是定义
+  Stream IO 处理方法的基类。它也是一个被 Processor 回调的 Continuation。
+
+  VCconnection 定义了一个可以串联的虚拟管道，可以让 ATS 在网络、状态机、磁盘间
+  形成流式数据通信，是上层通信机制的很关键一环.
 
 */
+
+/*
+                                               +------ UserSM ------+
+           UpperSM Area                       /       (HTTPSM)       \
+                                             /                        \
+                                            /                          \
+     *** CS_FD ********************** CS_VIO ************************** SS_VIO ********************** SS_FD ***
+               \                     /                                        \                     /
+                +------ CS_VC ------+          EventSystem & IO Core           +------ SS_VC ------+
+     
+      CS_FD = Client Side File Descriptor
+      SS_FD = Server Side File Descriptor
+      CS_VC = Client Side VConnection
+      SS_VC = Server Side VConnection
+     CS_VIO = Client Side VIO
+     SS_VIO = Server Side VIO
+     UserSM = User Defined SM ( HTTPSM )
+     ****** = Separator Line
+
+ * 当 FD 处于可读或者可写的状态时，回调 VC，把 FD 上的读取到的数据生产到 VIO 里，或者把 VIO 里的数据拿出来
+ * 消费掉写入到 FD 里。
+ * 当 VIO 里的数据产生变化时，回调 UserSM，并告知变化的原因。
+ * 所以，可以将 VC 理解为负责把数据在 FD 和 VIO 之间移动的状态机。
+ */
 class VConnection : public Continuation
 {
 public:
@@ -156,6 +188,7 @@ public:
 
   /**
     Read data from the VConnection.
+    读取来自 VConnection 的数据.
 
     Called by a state machine to read data from the VConnection.
     Processors implementing read functionality take out lock, put
@@ -163,11 +196,24 @@ public:
     releasing the lock in order to enable the state machine to
     handle transfer schemes where the end of a given transaction
     is marked by a special character (ie: NNTP).
-
+    - 状态机（SM）调用它来从 VConnection 读取数据。
+    - 处理机（Processor）实现这个读取功能时，首先获取锁，然后将新的数据放入到 buf，回调 Continuation，然后释放锁
+    - 例如：让状态机能够处理以特殊字符作为事务结束的数据传输协议（NNTP）。
+    
     <b>Possible Event Codes</b>
+    可能的 Event Codes
 
     On the callback to the continuation, the VConnection may use
     on of the following values for the event code:
+    在状态机回调 Conntinuation 时，VConnection 可能会使用这些值作为 Event Code：
+    - VC_EVENT_READ_READY 
+        - 数据已经添加到 buffer，或者 buffer 满了
+    - VC_EVENT_READ_COMPLETE 
+        - nbytes 字节的数据已经被读取到 buffer 了
+    - VC_EVENT_EOS 
+        - Stream 的读取端关闭了连接
+    - VC_EVENT_ERROR
+        - 在读取期间发生了错误
 
     <table border="1">
       <tr>
@@ -194,19 +240,41 @@ public:
     </table>
 
     @param c Continuation to be called back with events.
+        - 在读取操作完成后，将要回调的 Continuation，同时会传递 Event Code 过去
     @param nbytes Number of bytes to read. If unknown, nbytes must
       be set to INT64_MAX.
+        - 想要读取的字节数，如果不确定要读取多少，必须设定为 INT64_MAX
     @param buf buffer to read into.
+        - 读取到的数据会放入到这里
     @return VIO representing the scheduled IO operation.
+        - 代表调度 IO 操作的 VIO 类型
+
+    注意：
+      - 当 c = NULL，nbytes = 0，buf = NULL 时表示取消之前设置的 do_io_read 操作
+      - 当没有数据可读，或者 buf 写满，会导致 VIO 被 disable，需要调用 reenable 才会继续读取数据.
 
   */
   virtual VIO *do_io_read(Continuation *c = nullptr, int64_t nbytes = INT64_MAX, MIOBuffer *buf = nullptr) = 0;
 
   /**
     Write data to the VConnection.
-
+    准备向 VConnection 写入数据.
+    
     This method is called by a state machine to write data to the
     VConnection.
+    该方法由当状态机将要向 VConnection 写入数据时调用。
+
+    可能的 Event Codes（在状态机回调 Continuation 时，VConnection 可能会使用这些值作为 Event Code）：
+      - VC_EVENT_WRITE_READY
+          - 已经将 reader 中的数据写完了或者 reader 中已经没有可用的数据要写
+      - VC_EVENT_WRITE_COMPLETE
+          - 来自 buffer 的 nbytes 字节的数据已经写入到 VConnection
+      - VC_EVENT_INACTIVITY_TIMEOUT
+          - 在一段时期内没有任何活动的操作
+      - VC_EVENT_ACTIVE_TIMEOUT
+          - 写操作花费的时间超过了指定的时间限制，即写超时
+      - VC_EVENT_ERROR
+          - 在写的过程中发生错误
 
     <b>Possible Event Codes</b>
 
@@ -243,11 +311,15 @@ public:
     </table>
 
     @param c Continuation to be called back with events.
+        - 在写操作完成后，将要回调的 Continuation，同时传递 Event Code。
     @param nbytes Number of bytes to write. If unknown, nbytes must
       be set to INT64_MAX.
+        - 想要写入的字节数，若不确定写多少，则设定为 INT64_MAX
     @param buf Reader whose data is to be read from.
+        - 数据源，将从这里读取数据，然后写入
     @param owner
     @return VIO representing the scheduled IO operation.
+        - 代表调度 IO 操作的 VIO 类型
 
   */
   virtual VIO *do_io_write(Continuation *c = nullptr, int64_t nbytes = INT64_MAX, IOBufferReader *buf = nullptr,
@@ -255,6 +327,11 @@ public:
 
   /**
     Indicate that the VConnection is no longer needed.
+    指示不再需要该 VConnection.
+      - 当状态机使用完一个 VConnection，必须调用此函数，表示可以进行回收。
+      - 在调用了 close 后
+          - VConnection 和底层的 Processor 都不能再发送任何与此 VConnection 相关联的 Event 给状态机
+          - 状态机也不能够访问该 VConnection 和从其获得/返回的 VIO.
 
     Once the state machine has finished using this VConnection, it
     must call this function to indicate that the VConnection can
@@ -267,12 +344,22 @@ public:
     @param lerrno indicates where a close is a normal close or an
       abort. The difference between a normal close and an abort
       depends on the underlying type of the VConnection.
+      - 用于表示这是一个正常的关闭还是一个异常的关闭
+      - 两种关闭的区别由底层的 VConnection 类型来决定
+      - 正常关闭，lerrno = -1，设置 vc->closed = 1
+      - 异常关闭，lerrno != -1，设置 vc->closed = -1，vc->lerrno = lerrno
+      - 大多数情况下，ATS 内部并未区别处理正常关闭与异常关闭，好像只有 ClusterVC 中做了区别对待
 
   */
   virtual void do_io_close(int lerrno = -1) = 0;
 
   /**
     Terminate one or both directions of the VConnection.
+    中止 VConnection 的单向或者双向传输.
+      - 调用此方法后，与之相关方向的 I/O 操作都将被禁止
+      - Processor 不可以发送任何与之相关的 Event（甚至是 timeout event）给状态机
+      - 状态机也不可以使用来自被 shutdown 方向的 VIO
+      - 即使双向传输都被 shutdown，当状态机需要回收该 VConnection 时，仍然必须通过调用 do_io_close() 来完成回收操作.
 
     Indicates that one or both sides of the VConnection should be
     terminated. After this call is issued, no further I/O can be
@@ -282,6 +369,14 @@ public:
     from a shutdown direction of the connection. Even if both sides
     of a connection are shutdown, the state machine must still call
     do_io_close() when it wishes the VConnection to be deallocated.
+
+    howto 取值含义：
+      - IO_SHUTDOWN_READ
+          - 关闭读取端，表示该 VConnection 不应该再产生 Read Event
+      - IO_SHUTDOWN_WRITE
+          - 关闭写入端，表示该 VConnection 不应该再产生 Write Event
+      - IO_SHUTDOWN_READWRITE
+          - 双向关闭，表示该 VConnection 不应该再产生 Read 和 Write Event
 
     <b>Possible howto values</b>
 
@@ -319,9 +414,12 @@ public:
   // Private
   // Set continuation on a given vio. The public interface
   // is through VIO::set_continuation()
+  // 为指定 VIO 设置 Continuation，通常应该由 VIO::set_continuation() 来调用此方法
   virtual void set_continuation(VIO *vio, Continuation *cont);
 
   // Reenable a given vio.  The public interface is through VIO::reenable
+  // 激活指定的 VIO，通常应该由 VIO::reenable() 来调用此方法
+  //    让之前设置的 VIO 恢复运行，EventSystem 将会呼叫处理机（Processor）
   virtual void reenable(VIO *vio);
   virtual void reenable_re(VIO *vio);
 
@@ -380,8 +478,10 @@ public:
 
 /**
   Subclass of VConnection to provide support for user arguments
+  VConnection 的子类，为用户参数提供支持。
 
   Inherited by DummyVConnection (down to INKContInternal) and NetVConnection
+  由 DummyVConnection（向下到 INKContInternal） 和 NetVConnection 继承
 */
 class AnnotatedVConnection : public VConnection
 {

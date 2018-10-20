@@ -71,6 +71,7 @@ public:
 /**
   Base class for all state machines to receive notification of
   events.
+  Continuation 是所有状态机接收事件通知的基类.
 
   The Continuation class represents the main abstraction mechanism
   used throughout the IO Core Event System to communicate its users
@@ -90,7 +91,22 @@ public:
   must be allocated by continuation-derived classes or by clients
   of the IO Core Event System and it is required as a parameter to
   the Continuation's class constructor.
+  鉴于事件系统的多线程特性，每个 Continuation 都带有一个对 ProxyMutex 
+  对象的引用，以保护其状态，并确保其原子操作。
+  因此，在创建任何一个 Continuation 对象或由其派生的对象时：
+  - 通常由使用 EventSystem 的客户来创建 ProxyMutex 对象
+  - 然后在创建 Continuation 对象时，将 ProxyMutex 对象作为参数传递给
+    Continuation 类的构造函数.
 
+  Continuation 是一个轻型数据结构。
+  它的实现只有一个用于回调的方法 int handleEvent(int, void *)
+    - 该方法是面向 Processor 和 EThread 的一个接口
+    - 它可以被继承，以添加额外的状态和方法.
+  可以通过提供 ContinuationHandler（成员 handler 的类型）来决定 Continuation 的行为
+    - 该函数在事件到达时，由 handleEvent 调用
+    - 可以通过以下方法来设置/改变（头文件内定义了两个宏）：
+      - SET_HANDLER(_h)
+      - SET_CONTINUATION_HANDLER(_c, _h)
 */
 
 class Continuation : private force_VFPT_to_top
@@ -98,11 +114,14 @@ class Continuation : private force_VFPT_to_top
 public:
   /**
     The current continuation handler function.
+    当前的 Continuation 处理函数
 
     The current handler should not be set directly. In order to
     change it, first acquire the Continuation's lock and then use
     the SET_HANDLER macro which takes care of the type casting
     issues.
+    在对 mutex 成员上锁之后，使用 SET_HANDLER 宏进行设置。
+    不要直接对该成员进行操作。
 
   */
   ContinuationHandler handler = nullptr;
@@ -113,10 +132,12 @@ public:
 
   /**
     The Continuation's lock.
+    当前 Continuation 对象的锁.
 
     A reference counted pointer to the Continuation's lock. This
     lock is initialized in the constructor and should not be set
     directly.
+    通过构造函数完成初始化，不要直接对该成员进行操作.
 
     TODO:  make this private.
 
@@ -131,9 +152,11 @@ public:
 
   /**
     Link to other continuations.
+    链接到其他 Continuation 的双向链表.
 
     A doubly-linked element to allow Lists of Continuations to be
     assembled.
+    在需要创建一个队列用来保存 Continuation 对象时使用。
 
   */
   LINK(Continuation, link);
@@ -146,15 +169,21 @@ public:
 
   /**
     Receives the event code and data for an Event.
+    接收来自 Event 回调的事件代码和事件数据。
 
     This function receives the event code and data for an event and
     forwards them to the current continuation handler. The processor
     calling back the continuation is responsible for acquiring its
     lock.  If the lock is present and not held, this method will assert.
+    接收事件代码和事件数据并透传给当前的 continuation handler。
+    回调 Continuation 的 Processor 负责对 Continuation 的 mutex 上锁.
 
     @param event Event code to be passed at callback (Processor specific).
+                 由 Processor 指定，在回调时传入的事件代码
     @param data General purpose data related to the event code (Processor specific).
+                由 Processor 指定，与事件代码相关的数据
     @return State machine and processor specific return code.
+            状态机和 Processor 指定的返回值
 
   */
   TS_INLINE int
@@ -167,6 +196,7 @@ public:
 
   /**
     Receives the event code and data for an Event.
+    接收一个 Event 的事件代码和事件数据。
 
     It will attempt to get the lock for the continuation, and reschedule
     the event if the lock cannot be obtained.  If the lock can be obtained
@@ -183,6 +213,8 @@ protected:
   /**
     Constructor of the Continuation object. It should not be used
     directly. Instead create an object of a derived type.
+    在 ATS 中，不会直接创建 Continuation 类型的对象，而是创建其继承类的实例。
+    因此也就不存在直接与之对应的 ClassAllocator 对象。
 
     @param amutex Lock to be set for this Continuation.
 
@@ -194,6 +226,7 @@ protected:
 /**
   Sets the Continuation's handler. The preferred mechanism for
   setting the Continuation's handler.
+  设置 Continuation 的 handler.
 
   @param _h Pointer to the function used to callback with events.
 
@@ -206,11 +239,15 @@ protected:
 
 /**
   Sets a Continuation's handler.
+  设置 Continuation 对象的 handler.
 
   The preferred mechanism for setting the Continuation's handler.
+  设置 Continuation handler 的首选机制。
 
   @param _c Pointer to a Continuation whose handler is being set.
+            指向正在设置其 handler 成员的 Continuation 的指针
   @param _h Pointer to the function used to callback with events.
+            指向将要用于回调事件的函数的指针.
 
 */
 #ifdef DEBUG

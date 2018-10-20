@@ -284,6 +284,9 @@ struct NetVCOptions {
   streams. In one sense, they serve a purpose similar to file
   descriptors. Unlike file descriptors, VConnections allow for a
   stream IO to be done based on a single read or write call.
+  网络套接字 VConnection。网络连接的抽象。与 socket 描述符类似，VConnection
+  是流的 IO 句柄。在某种意义上，它们的用途与文件描述符类似。但与文件描述符不同的是，
+  VConnection 允许基于单个读/写调用完成流 IO。
 
 */
 class NetVConnection : public AnnotatedVConnection
@@ -402,6 +405,12 @@ public:
     send or VC_EVENT_EOS - if the other side has shutdown the
     connection. These callbacks could be re-entrant. Only one
     send_OOB can be in progress at any time for a VC.
+    通过该连接发送带外数据。
+    将长度为 len 的缓存区 buf 内的数据以带外方式发送。
+    发送成功，回调 cont 时传递 VC_EVENT_OOB_COMPLETE 事件
+    对方关闭，回调 cont 时传递 VC_EVENT_EOS 事件
+    cont 回调必须是可重入的
+    每一个 VC 同一时间只能有一个 send_OOB 操作
 
     @param cont to be called back with events.
     @param buf message buffer.
@@ -415,6 +424,10 @@ public:
     been sent already. Not callbacks to the cont are made after
     this call. The Action returned by send_OOB should not be accessed
     after cancel_OOB.
+    取消带外数据的发送。
+    取消之前调用 send_OOB 安排的带外数据发送操作，但是有可能会有部分数据已经发送出去。
+    执行之后，不会再有任何对 cont 的回调，而且也不能再访问之前 send_OOB 返回的 Action 对象。
+    当之前的 send_OOB 操作没有完成，而又需要进行一个新的 send_OOB 操作时，必须要执行 cancel_OOB 取消之前的操作.
 
   */
   virtual void cancel_OOB();
@@ -431,9 +444,17 @@ public:
   // called when handing an  event from this NetVConnection,//
   // or the NetVConnection creation callback.               //
   ////////////////////////////////////////////////////////////
+  /* 连接的超时设置。
+   * active_timeout 用于连接的整个生存周期
+   * inactivity_timeout 用于最近一次读写操作之后的生存周期.
+   * 可以重复调用这些方法，以复位超时统计时间。
+   * 由于这些方法不是线程安全的，所以仅可以在 NetVConnection 处理
+   * 事件时调用，或者 NetVConnection 创建回调时调用。
+   */
 
   /**
     Sets time after which SM should be notified.
+    在指定时间之后通知状态机（SM）。
 
     Sets the amount of time (in nanoseconds) after which the state
     machine using the NetVConnection should receive a
@@ -443,8 +464,14 @@ public:
     called repeatedly This call can be used by SMs to make sure
     that it does not keep any connections open for a really long
     time.
+    设置一个时间量（纳秒），在此之后回调与此 NetVConnection 关联的状态机(SM)，
+    并传递 VC_EVENT_ACTIVE_TIMEOUT 事件。
+    如果当前连接没有处于 active 状态（没有读、写操作），那么就会忽略这个值。
+    PS：事实上，是优先判断 Inactivity Timeout，当出现 Inactivity Timeout 时就不会
+    回调 Active Timeout 事件。
 
     Timeout symantics:
+    超时的定义：
 
     Should a timeout occur, the state machine for the read side of
     the NetVConnection is signaled first assuming that a read has
@@ -460,13 +487,30 @@ public:
     side state machine as well. To signal write side, a write must
     have been initiated on it and the write must not have been
     shutdown.
+    如果超时发生，与 NetVConnection 读取端关联的状态机（SM）首先被回调，
+    以确保 NetVConnection 上已经读取到了数据，并且读端没有被关闭。如果
+    两个条件都没有被满足，那么 NetProcessor 尝试回调写入端关联的状态机（SM）。
+    PS：读端被关闭（读半关闭，读到 0 字节），如果没有数据写入，通常意味着连接被对端关闭了。
+
+    回调读端状态机，
+        如果返回了 EVENT_DONE：
+            那么就不会再回调写端状态机；
+        如果返回的不是 EVENT_DONE，并且写端状态机与读端不是同一个状态机（比较回调函数的指针）：
+            NetProcessor 将尝试回调写端状态机。
+
+    回调写端之前，要确保数据已经被写入，并且写端没有关闭（写半关闭）。
 
     Receiving a timeout is only a notification that the timer has
     expired. The NetVConnection is still usable. Further timeouts
     of the type signaled will not be generated unless the timeout
     is reset via the set_active_timeout() or set_inactivity_timeout()
     interfaces.
+    状态机收到 TIMEOUT 事件，只是一个通知，表示计时时间已到，但是     NetVConnection 仍然可用。
+    除非通过 set_active_timeout() 或 set_inactivity_timeout() 重置计时器，否则后续的超时信号
+    将不再被触发。
 
+    每次调用此函数，都会重新对超时时间进行计时。
+    通过这个方法，可以让状态机（SM）处理那些长时间不关闭（但是有通信）的连接。
   */
   virtual void set_active_timeout(ink_hrtime timeout_in) = 0;
 
@@ -480,6 +524,10 @@ public:
     again also resets the timer. The timeout is value is ignored
     if neither the read side nor the write side of the connection
     is currently active. See section on timeout semantics above.
+    如果发起的 IO 操作没有在指定时间完成，就通知状态机（SM）。
+    如果在最近一次状态机操作 NetVConnection 之后，达到设置的时间量（纳秒），
+    NetVConnection 在读端和写端仍然处于空闲状态，将会回调与此 NetVConnection 
+    关联的状态机（SM），并传递 VC_EVENT_INACTIVITY_TIMEOUT 事件。
 
    */
   virtual void set_inactivity_timeout(ink_hrtime timeout_in) = 0;
@@ -487,6 +535,8 @@ public:
   /**
     Clears the active timeout. No active timeouts will be sent until
     set_active_timeout() is used to reset the active timeout.
+    清除 active timeout。在调用 set_active_timeout() 重新设置之前，不会再有
+    active timeout 事件发送。
 
   */
   virtual void cancel_active_timeout() = 0;
@@ -495,7 +545,8 @@ public:
     Clears the inactivity timeout. No inactivity timeouts will be
     sent until set_inactivity_timeout() is used to reset the
     inactivity timeout.
-
+    清除 inactivity timeout。在调用 set_inactivity_timeout() 重新设置之前，
+    不会再有 inactivity timeout 事件发送。
   */
   virtual void cancel_inactivity_timeout() = 0;
 
@@ -514,22 +565,53 @@ public:
     return;
   }
 
+  // 以下四个方法是对 NetHandler 中对应方法的封装，其实是通过成员 nh 调用了 NetHandler 的方法
+  // 添加 NetVConnection 到 keep alive 队列
   virtual void add_to_keep_alive_queue() = 0;
 
+  // 从 keep alive 队列移除 NetVConnection
   virtual void remove_from_keep_alive_queue() = 0;
 
+  // 添加 NetVConnection 到 active 队列
   virtual bool add_to_active_queue() = 0;
 
+  // 返回当前 active timeout 的值（纳秒）
   /** @return the current active_timeout value in nanosecs */
   virtual ink_hrtime get_active_timeout() = 0;
 
+  // 返回当前 inactivity timeout 的值（纳秒）
   /** @return current inactivity_timeout value in nanosecs */
   virtual ink_hrtime get_inactivity_timeout() = 0;
 
+  // 特殊机制：如果写操作导致缓存区为空（MIOBuffer 内没有数据可写了），就使用指定的事件回调状态机
   /** Force an @a event if a write operation empties the write buffer.
+
+      此机制简称为：WBE
+      在 IOCoreNet 处理中，如果我们设置了这个特殊的机制，那么：
+        在下一次从 MIOBuffer 向 socket fd 写数据的过程中，
+        如果 MIOBuffer 中当前可用于写操作的数据都被写完：
+          将使用指定的 event 回调状态机
 
       This event will be sent to the VIO, the same place as other IO events.
       Use an @a event value of 0 to cancel the trap.
+      如果传入的 event 为 0，表示取消这个操作。
+      同其它 IO 事件一样，回调时传递的是 VIO 数据类型.
+
+      这个操作是单次触发，如果需要重复触发，就需要再次设置。
+
+      PS：在 NetHandler 回调的 write_to_net_io() 方法中的回调逻辑如下：
+          如果 MIOBuffer 有剩余空间，则首先发送 WRITE READY 回调状态机填充 MIOBuffer
+          然后开始将 MIOBuffer 里的数据写入 socket fd
+          保存 WBE 到 wbe_event，wbe_event = WBE；
+          如果 MIOBuffer 被写空
+              清除 WBE 状态，发送 = 0
+          如果完成了 VIO，发送 WRITE COMPLETE 回调状态机，结束写操作
+          如果已经发送 WRITE READY 并且设置了 WBE
+              发送 wbe_event 回调状态机，如果回调返回值不是 EVENT_CONT，结束写操作
+          如果之前没有发送 WRITE READY 回调过状态机
+              发送 WRITE READY 回调状态机，如果返回值不是 EVENT_CONT，结束写操作
+          如果 MIOBuffer 被写空，禁止 VC 上的后续事件，结束写操作
+          重新调度读、写操作
 
       The event is sent only the next time the write buffer is emptied, not
       every future time. The event is sent only if otherwise no event would
@@ -537,27 +619,32 @@ public:
    */
   virtual void trapWriteBufferEmpty(int event = VC_EVENT_WRITE_READY);
 
+  // 返回 local sockaddr 对象的指针，支持 IPv4 和 IPv6
   /** Returns local sockaddr storage. */
   sockaddr const *get_local_addr();
 
   /** Returns local ip.
       @deprecated get_local_addr() should be used instead for AF_INET6 compatibility.
   */
-
+  // 返回 local ip，只支持 IPv4，不建议使用的老旧方法，即将废弃
   in_addr_t get_local_ip();
 
+  // 返回 local port
   /** Returns local port. */
   uint16_t get_local_port();
 
+  // 返回 remote sockaddr 对象的指针，支持 IPv4 和 IPv6
   /** Returns remote sockaddr storage. */
   sockaddr const *get_remote_addr();
   IpEndpoint const &get_remote_endpoint();
 
+  // 返回 remote ip
   /** Returns remote ip.
       @deprecated get_remote_addr() should be used instead for AF_INET6 compatibility.
   */
   in_addr_t get_remote_ip();
 
+  // 返回 remote port
   /** Returns remote port. */
   uint16_t get_remote_port();
 
@@ -582,6 +669,11 @@ public:
     return netvc_context;
   }
 
+  /*
+   * 保存了用户设置的结构体
+   * 在 ATS 中将对主体对象的设置信息独立出来的做法，在多个地方都有应用，
+   * 这样做可以在创建一组相同设置的对象时共用同一个设置实例，以减少对内存的占用
+   */
   /** Structure holding user options. */
   NetVCOptions options;
 
@@ -590,13 +682,18 @@ public:
 
   //
   // Private
+  // 以下方法不建议直接调用，没有声明为 private 类型是为了顺利通过代码的编译
   //
 
   // The following variable used to obtain host addr when transparency
   // is enabled by SocksProxy
+  // 当 SocksProxy 的 transparency 打开时，用来获取主机地址
   SocksAddrType socks_addr;
 
+  // 指定 NetVConnection 的属性
+  // 用得比较多的就是 HTTPProxyPort::TRANSPORT_BLIND_TUNNEL
   unsigned int attributes;
+  // 指向持有此 NetVConnection 的 EThread
   EThread *thread;
 
   /// PRIVATE: The public interface is VIO::reenable()

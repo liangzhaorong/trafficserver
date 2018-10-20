@@ -145,6 +145,7 @@ ThreadAffinityInitializer::alloc_hugepage_stack(size_t stacksize)
 void
 ThreadAffinityInitializer::init()
 {
+  // 首先判断要支持的 CPU affinity 的类型
   int affinity = 1;
   REC_ReadConfigInteger(affinity, "proxy.config.exec_thread.affinity");
 
@@ -179,6 +180,7 @@ ThreadAffinityInitializer::init()
     obj_name = "Machine";
   }
 
+  // 根据 CPU AF 的类型，判断有多少个逻辑 CPU
   obj_count = hwloc_get_nbobjs_by_type(ink_get_topology(), obj_type);
   Debug("iocore_thread", "Affinity: %d %ss: %d PU: %d", affinity, obj_name, obj_count, ink_number_of_processors());
 }
@@ -332,6 +334,8 @@ EventProcessor::register_event_type(char const *name)
   return n_thread_groups - 1;
 }
 
+// EventProcessor 提供了专门用于创建 REGULAR 类型的 EThread 组的方法，
+// 此方法一次创建一批线程来实现并发处理某种功能的事件（Event）。
 EventType
 EventProcessor::spawn_event_threads(char const *name, int n_threads, size_t stacksize)
 {
@@ -361,6 +365,7 @@ EventProcessor::spawn_event_threads(EventType ev_type, int n_threads, size_t sta
 
   Debug("iocore_thread", "Thread stack size set to %zu", stacksize);
 
+  // 循环逐个创建 REGULAR 类型的 EThread 实例
   for (i = 0; i < n_threads; ++i) {
     EThread *t                   = new EThread(REGULAR, n_ethreads + i);
     all_ethreads[n_ethreads + i] = t;
@@ -369,6 +374,7 @@ EventProcessor::spawn_event_threads(EventType ev_type, int n_threads, size_t sta
     t->set_event_type(ev_type);
     t->schedule_spawn(&thread_initializer);
   }
+  // 创建完毕，累加 REGULAR 总线程数
   tg->_count = n_threads;
   n_ethreads += n_threads;
 
@@ -416,6 +422,7 @@ int
 EventProcessor::start(int n_event_threads, size_t stacksize)
 {
   // do some sanity checking.
+  // 通过静态变量 started，防止 EventProcessor::start 被重入
   static bool started = false;
   ink_release_assert(!started);
   ink_release_assert(n_event_threads > 0 && n_event_threads <= MAX_EVENT_THREADS);
@@ -446,6 +453,8 @@ EventProcessor::start(int n_event_threads, size_t stacksize)
   this->spawn_event_threads(ET_CALL, n_event_threads, stacksize);
 
   Debug("iocore_thread", "Created event thread group id %d with %d threads", ET_CALL, n_event_threads);
+  // 返回 0，准确的说是返回 ET_CALL
+  // 其实就是创建的线程组的 ID，因为是第一组，所以是 0，跟 spawn_event_threads() 是一样的
   return 0;
 }
 
@@ -454,6 +463,7 @@ EventProcessor::shutdown()
 {
 }
 
+// 专门用于创建 DEDICATED 类型的 EThread 的方法
 Event *
 EventProcessor::spawn_thread(Continuation *cont, const char *thr_name, size_t stacksize)
 {
@@ -474,7 +484,9 @@ EventProcessor::spawn_thread(Continuation *cont, const char *thr_name, size_t st
   // Do as much as possible outside the lock. Until the array element and count is changed
   // this is thread safe.
   Event *e = eventAllocator.alloc();
+  // 创建一个包含 Cont 的立即执行的事件(Event)
   e->init(cont, 0, 0);
+  // 然后创建 DEDICATED 类型的 EThread，并传入该事件（Event）
   e->ethread  = new EThread(DEDICATED, e);
   e->mutex    = e->ethread->mutex;
   cont->mutex = e->ethread->mutex;
@@ -485,6 +497,7 @@ EventProcessor::spawn_thread(Continuation *cont, const char *thr_name, size_t st
     ++n_dthreads; // Be very sure this is after the array element update.
   }
 
+  // 启动 EThread
   e->ethread->start(thr_name, nullptr, stacksize);
 
   return e;

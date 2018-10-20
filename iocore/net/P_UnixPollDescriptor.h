@@ -40,16 +40,43 @@
 #define INK_EVP_HUP 0x020
 #endif
 
+// 定义一个 PollDescriptor 可以处理的最大描述符的数量
+// 这里定义为 32k = 32768 = 0x10000，如果要修改这个值，也建议采用 16 的整数倍
+//   以保证在存储这些数据时实现内存边界的对齐.
 #define POLL_DESCRIPTOR_SIZE 32768
 
 typedef struct pollfd Pollfd;
 
+/**
+ * PollDescriptor 是对多种平台上的 I/O poll 操作的封装，目前 ATS 支持 epoll，kqueue，port 三种
+ * 可以把 PollDescriptor 看成是一个队列：
+ *   - 把 Socket FD 放入 poll fd / PollDescriptor 队列
+ *   - 然后通过 Polling 操作，从 poll fd / PollDescriptor 队列中批量取出一部分 socket fd
+ *   - 而且这是一个原子队列
+ * 
+ * EventIO 是 PollDescriptor 队列的成员，也是 PollDescriptor 对外提供的接口：
+ *   - 为每一个 socket fd 提供一个 EventIO，把 Socket FD 封装到 EventIO 内
+ *   - 提供把 EventIO 自身放入 PollDescriptor 队列的接口
+ * 
+ */
+
 struct PollDescriptor {
   int result; // result of poll
 #if TS_USE_EPOLL
+  // 用于保存 epoll_create 创建的 epoll fd
   int epoll_fd;
+  // nfds 和 pfd 在 TCP 的部分没有用到，目前应该只有在 UDP 里才会使用
+  // 记录有多少个 fd 被添加到 epoll fd 中
   int nfds; // actual number
+  // 每一个 fd 被添加到 epoll fd 前会保存到 pfd 这个数组里
   Pollfd pfd[POLL_DESCRIPTOR_SIZE];
+  /*
+   * 用来保存 epoll_wait 返回的 fd 状态集，result 中保存了实际的 fd 数量
+   * 为什么不在 epoll_wait 处使用函数内部变量，而要固定分配一个内存区域呢？
+   *     由于 epoll_wait 需要非常高频率的运行，因此这个内存区域需要非常高频次的分配和释放，
+   *     即使在函数内定义为内部数组变量，那么也会频繁的从栈里分配空间，
+   *     所以不如分配一个固定的内存区域
+   */
   struct epoll_event ePoll_Triggered_Events[POLL_DESCRIPTOR_SIZE];
 #endif
 #if TS_USE_KQUEUE
@@ -59,11 +86,17 @@ struct PollDescriptor {
   int port_fd;
 #endif
 
+  // 构造函数，调用 init() 完成初始化
   PollDescriptor() { init(); }
 #if TS_USE_EPOLL
+  // 下面四个宏定义是一组通用方法，对于 kqueue 等其他系统的 I/O poll 操作也都是抽象为这四个方法
+  // 获取 I/O poll 描述符，对于 epoll 就是 epoll fd
 #define get_ev_port(a) ((a)->epoll_fd)
+  // 获取指定 fd 当前的事件状态，在 epoll_wait 之后通过这个方法获取返回的 fd 的事件状态
 #define get_ev_events(a, x) ((a)->ePoll_Triggered_Events[(x)].events)
+  // 获取指定 fd 绑定的数据指针，对于 epoll 就是 epoll_event 结构体的 data.ptr
 #define get_ev_data(a, x) ((a)->ePoll_Triggered_Events[(x)].data.ptr)
+  // 准备获取下一个 fd，对于 epoll 来说这里没啥对应的操作
 #define ev_next_event(a, x)
 #endif
 
@@ -102,6 +135,8 @@ struct PollDescriptor {
 #define ev_next_event(a, x)
 #endif
 
+  // 从 pfd 中分配一个地址空间
+  // 仅用于 epoll 对 UDP 的支持，如使用 kqueue 等其它系统的 I/O poll 操作，则直接返回 NULL
   Pollfd *
   alloc()
   {
@@ -117,6 +152,7 @@ struct PollDescriptor {
   }
 
 private:
+  // 初始化 epoll_fd 及事件数组
   void
   init()
   {

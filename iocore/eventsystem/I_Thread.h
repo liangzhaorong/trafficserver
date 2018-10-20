@@ -28,6 +28,9 @@
   Threads in the context of Event Subsystem. Hopefully this would be
   typical of other situations.
 
+  Thread 类为 threads 提供基本的功能。典型的，将会有其他派生类。在许多情况下，
+  为所有的线程提供一个共有基类是很有用的。
+
   EventProcessor needs to create a bunch of threads. It declares a
   class called EThread, derived from Thread. It is the responsibility of
   the EventProcessor to create and manage all the threads needed in the
@@ -54,6 +57,30 @@
   Note that an event created with EThread can also call this_thread(),
   in which case, it will get a pointer to Thread (rather than to EThread).
 
+  Thread 类包含一个 thread_key（成员 thread_data_key），所有的线程都通过线程
+  特有数据相关的调用，借助 thread_key 注册到系统中（包含了所有创建出来的 Thread
+  类型和其继承类的实例）。
+
+  任何时候，只要你调用 this_thread() 你就可以得到一个指向运行当前代码的 Thread
+  实例的指针。
+
+  // 这句注释的描述的机制没有在代码中体现，可能由于代码的删减，现在已经没有了。
+  Additionally, the EThread class (derived from Thread) maintains its own independent key. 
+  另外，EThread 类（继承自 Thread）维护一个独属于自己的 thread_key。
+
+  所有 EventSystem 中创建的线程都使用这个（同一个）thread_key 注册。
+
+  // 这句注释的描述的机制没有在代码中体现，可能由于代码的删减，现在已经没有了。
+  If you happen to call this_ethread() from inside a thread which is not an EThread, you will
+  get a nullptr value (since that thread will not be  registered with the EThread key). 
+  This will hopefully make the use of this_ethread() safer.
+  如果你从一个不是 EThread 的线程中调用 this_ethread()，那么你会得到 NULL。因为这个线程没有
+  使用 EThread 的 key 来注册。我们希望可以让 this_ethread() 的使用更安全。
+
+  需要值的注意的是，在 EThread 中可以调用 this_thread()，但是，得到的是一个指向 Thread 类型
+  的指针（而不是 EThread 类型）。
+  注：在当前的代码中，可以通过类型转换为 EThread，在 this_ethread() 里就是这么做的。
+  
  */
 
 #pragma once

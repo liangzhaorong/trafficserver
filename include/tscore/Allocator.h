@@ -50,6 +50,26 @@
 
 extern int cmd_disable_pfreelist;
 
+/**
+ * Allocator 是 ATS 内部使用的一种内存管理技术，主要用来减少内存分配次数，
+ * 从而提高性能。另外，通过把相同尺寸的内存块连续存放，也减少了内存的碎片
+ * 化。
+ *
+ * Allocator 类是所有 ClassAllocator 类的基类：
+ *   - free pool
+ *       - 内存块有一个名字，在构造函数中设置
+ *       - 至少包含一个内存单元
+ *       - 内存单元的尺寸由：element_size * chunk_size 决定
+ *       - 该内存单元由 chunk_size 个 element_size 字节的 "小块内存" 组成
+ *       - chunk_size 默认为 128 个
+ *   - 它有三个方法
+ *       - alloc_void 调用 ink_freelist_new 从 free pool 获得一个固定尺寸的内存块
+ *       - free_void 调用 ink_freelist_free 将一个内存块归还给 free pool
+ *       - free_void_bulk 调用 ink_freelist_bulk 将一组内存块归还给 free pool
+ *   - 构造函数调用 ink_freelist_init 创建一整块内存，支持地址空间对齐
+ *
+ */
+
 /** Allocator for fixed size memory blocks. */
 class Allocator
 {
@@ -114,6 +134,69 @@ protected:
   InkFreeList *fl;
 };
 
+
+/**
+ * ClassAllocator 是一个 C++ 的类模板，继承自 Allocator 基类：
+ *   - 扩展了三个方法：alloc(), free(), free_bulk()
+ *       - 输入指针为 Class* 类型，主要是为了适配构造函数
+ *   - 与 Allocator 的区别就是 element_size = sizeof(Class)
+ *
+ * ATS 中时候到的各种数据结构，特别是需要在 EventSystem 与各种状态机之间
+ * 进行传递的数据结构，都需要分配内存。对于 ATS 这种服务器系统，每一个会话
+ * 进来的时候动态的分配内存，会话结束后释放内存，这种对内存的操作频率是非常
+ * 高的。
+ *
+ * 而且在会话存续期间，对于各种对象会有各种不同尺寸的内存空间被分配和释放，
+ * 内存的碎片化也非常严重。
+ *
+ * 所有的数据都使用 Allocator 类来分配，不符合面向对象的设计习惯，因此 ATS 
+ * 设计了 ClassAllocator 模板。
+ *
+ * 使用 ClassAllocator 模板为指定的数据结构类型（class C）定义了一个全局实例，
+ * 该实例内部有一个 proto 结构体，该结构体中 typeObject 是一个 class C 类型
+ * 的成员.
+ *
+ * ClassAllocator 的构造函数负责从操作系统分配到的大块内存，如每个内存块 16 MB，
+ * 然后按照 proto.typeObject 对象的尺寸切成小块。每一个大块内存将按照 sizeof(C)
+ * 为最小单位，分割为 chunk_size 个小单元，这些小单元被放入一个 free pool
+ * (InkFreeList *fl) 暂存。
+ *
+ * 然后，通过 ClassAllocator::alloc() 从 free pool 获取一个小块内存单元，
+ * ClassAllocator::free() 则用于归还小块内存单元。
+ *
+ * 这样就减少了直接通过操作系统进行内存分配的次数，而且把相同类型的对象连续存放，
+ * 减少了内存的碎片化。
+ *
+ * 1. 使用
+ * 1.1 定义一个全局实例
+ * 
+ *   ClassAllocator<NameOfClass> nameofclassAllocator("nameofclassAllocator", 256)
+ *
+ * 第一个参数是内存块的名字，第二个参数 256 表示 Allocator 创建大块内存时，每个大块
+ * 内存可以存放 256 个 NameOfClass 对象。
+ *
+ * 1.2 为 NameOfClass 类型的对象分配一个实例
+ *
+ *   NameOfClass *obj = nameofclassAllocator.alloc();
+ *   obj->init(...);
+ *
+ * alloc() 返回的对象，其构造函数已经执行过，再次调用 init() 是为了初始化指针类型
+ * 的成员。
+ *
+ * 1.3 回收内存
+ * 
+ *   obj->clear();
+ *   nameofclassAllocator.free(obj);
+ *   obj = NULL;
+ *
+ * 使用 clear() 方法，主要是为了释放指针类型的成员指向的内存对象。
+ * 或者调用 destroy() 方法：
+ * 
+ *   obj->destroy();
+ *   obj = NULL;
+ *
+ */
+
 /**
   Allocator for Class objects. It uses a prototype object to do
   fast initialization. Prototype of the template class is created
@@ -132,6 +215,7 @@ public:
   {
     void *ptr = ink_freelist_new(this->fl, freelist_class_ops);
 
+    // 直接将 proto.typeObject 对象复制到新的内存区域完成对象的创建
     memcpy(ptr, (void *)&this->proto.typeObject, sizeof(C));
     return (C *)ptr;
   }
@@ -144,6 +228,7 @@ public:
   void
   free(C *ptr)
   {
+    // 直接将内存块归还至大块内存.
     ink_freelist_free(this->fl, ptr, freelist_class_ops);
   }
 
