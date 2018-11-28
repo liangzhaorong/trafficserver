@@ -360,7 +360,7 @@ ChunkedHandler::generate_chunked_content()
       chunked_size += len;
     } else {
       chunked_buffer->write(max_chunk_header, max_chunk_header_len);
-      chunked_size += max_chunk_header_len;
+proxy.config.diags.debug.enabled      chunked_size += max_chunk_header_len;
     }
 
     // Output the chunk itself.

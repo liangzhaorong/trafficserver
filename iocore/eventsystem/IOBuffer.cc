@@ -32,6 +32,9 @@
 //
 // General Buffer Allocator
 //
+/* 在 ATS 中，每种长度的 buf 都有它专用的内存池和分配器，通过一个全局数组 
+ * ioBufAllocator[] 来定义，DEFAULT_BUFFER_SIZES 是这个数组的成员数量.
+ */
 inkcoreapi Allocator ioBufAllocator[DEFAULT_BUFFER_SIZES];
 inkcoreapi ClassAllocator<MIOBuffer> ioAllocator("ioAllocator", DEFAULT_BUFFER_NUMBER);
 inkcoreapi ClassAllocator<IOBufferData> ioDataAllocator("ioDataAllocator", DEFAULT_BUFFER_NUMBER);

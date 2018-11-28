@@ -218,21 +218,36 @@ struct PollCont : public Continuation {
   is the core component of the Net sub-system. Once started, it is responsible
   for polling socket fds and perform the I/O tasks in NetVC.
 
+  NetHandler 是 Net 子系统的 NetVC 处理器。NetHandler 是 Net 子系统的核心组件。
+  一旦启动，它负责轮询套接字 fds 并在 NetVC 中执行 I/O 任务。
+
   The NetHandler is executed periodically to perform read/write tasks for
   NetVConnection. The NetHandler::mainNetEvent() should be viewed as a part of
   EThread::execute() loop. This is the reason that Net System is a sub-system.
+
+  定期执行 NetHandler 来执行 NetVConnection 的读写任务。应将 NetHandler::mainNetEvent
+  视为 EThread::execute() 循环的一部分。这就是 Net 系统是一个子系统的原因。
 
   By get_NetHandler(this_ethread()), you can get the NetHandler object that
   runs inside the current EThread and then @c startIO / @c stopIO which
   assign/release a NetVC to/from NetHandler. Before you call these functions,
   holding the mutex of this NetHandler is required.
 
+  通过 get_NetHandler(this_ethread())，你可以获得当前 EThread 内运行的 NetHandler 对象，
+  然后获取 @c startIO / @c stopIO，它将 NetVC 分配给 NetHandler，或从 NetHandler 中释放
+  NetVC。在调用这些函数前，必须持有该 NetHandler 的 mutex。
+
   The NetVConnection provides a set of do_io functions through which you can
   specify continuations to be called back by its NetHandler. These function
   calls do not block. Instead they return an VIO object and schedule the
   callback to the continuation passed in when there are I/O events occurred.
 
+  NetVConnection 提供一组的 do_io 函数，通过它们可以指定由 NetHandler 回调的
+  continuations。这些函数调用不会阻塞。相反，它们返回一个 VIO 对象，并在发生 I/O 
+  事件时将调度的回调传入到 continuation。
+
   Multi-thread scheduler:
+  多线程调度器：
 
   The NetHandler should be viewed as multi-threaded schedulers which process
   NetVCs from their queues. The NetVC can be made of NetProcessor (allocate_vc)
@@ -240,7 +255,12 @@ struct PollCont : public Continuation {
   conveniently, calling a method service call (NetProcessor::connect_re) which
   synthesizes the NetVC and places it in the queue.
 
+  应将 NetHandler 视为多线程调度器，从队列中处理 NetVC。NetVC 可以由 NetProcessor (allocate_vc)
+  组成，可以直接 NetVC 添加到队列 (NetHandler::startIO)，或者更方便地，调用一个
+  方法服务调用 (NetProcessor::connect_re) 来合成 NetVC 并将其放置到队列。
+
   Callback event codes:
+  回调事件码:
 
   These event codes for do_io_read and reenable(read VIO) task:
     VC_EVENT_READ_READY, VC_EVENT_READ_COMPLETE,
@@ -251,17 +271,23 @@ struct PollCont : public Continuation {
     VC_EVENT_ERROR
 
   There is no event and callback for do_io_shutdown / do_io_close task.
+  do_io_shutdown / do_io_close 任务没有事件和回调。
 
   NetVConnection allocation policy:
+  NetVConnection 分配策略:
 
   NetVCs are allocated by the NetProcessor and deallocated by NetHandler.
   A state machine may access the returned, non-recurring NetVC / VIO until
   it is closed by do_io_close. For recurring NetVC, the NetVC may be
   accessed until it is closed. Once the NetVC is closed, it's the
   NetHandler's responsibility to deallocate it.
+  NetVC 由 NetProcessor 分配并由 NetHandler 释放。状态机可以访问返回的非重复
+  NetVC / VIO，直到 do_io_close 关闭为止。对于重复出现的 NetVC，可以访问 NetVC 直到
+  它 close。一旦 NetVC 被 close 了，NetHandler 就有责任 deallocate 它。
 
   Before assign to NetHandler or after release from NetHandler, it's the
   NetVC's responsibility to deallocate itself.
+  在分配给 NetHandler 之前或从 NetHandler 发布之后，NetVC 有责任 deallocate 自己。
 
  */
 
@@ -279,16 +305,50 @@ public:
   // If we don't get rid of @a trigger_event we should remove @a thread.
   EThread *thread      = nullptr;
   Event *trigger_event = nullptr;
+  /*
+   * 如下两个队列:
+   * 在 NetHandler::mainNetEvent 执行时，会首先将 (read|write)_enable_list 全部取出，导入到 (read|write)_ready_list
+   * 另外在执行同步 reenable 时，也会将 vc 直接放入此队列
+   * 在 EThread A 中要 reenable 一个 VC，这个 VC 也是由 EThread A 管理的，此时就属于同步 reenable
+   */
   QueM(UnixNetVConnection, NetState, read, ready_link) read_ready_list;
   QueM(UnixNetVConnection, NetState, write, ready_link) write_ready_list;
+  /* 
+   * 保存当前 EThread 管理的所有 VC 
+   */
   Que(UnixNetVConnection, link) open_list;
+  /*
+   * 在 InactivityCop 状态机中遍历 open_list，把 vc->thread == this_ethread() 的 vc 放入这个 cop_list
+   * 然后对 cop_list 内的 vc 逐个检查超时情况
+   * PS: 在 open_list 内的 vc，不存在 vc->thread 不是 this_ethread() 的情况
+   */
   DList(UnixNetVConnection, cop_link) cop_list;
+  /*
+   * 如下两个队列:
+   * 在执行异步 reenable 时，将 vc 直接放入原子队列
+   * 在 EThread A 中要 reenable 一个 VC，但是这个 VC 是由 EThread B 管理的，此时就属于异步 reenable
+   */
   ASLLM(UnixNetVConnection, NetState, read, enable_link) read_enable_list;
   ASLLM(UnixNetVConnection, NetState, write, enable_link) write_enable_list;
+  /* 
+   * 由上层状态机，如 HttpSM 等，通过 add_to_keep_alive_queue 将 vc 放入，用于实现 keep alive timeout
+   * 在 InactivityCop 中，通过 manage_keep_alive_queue 来清理
+   * 另外还提供了 remove_from_keep_alive_queue 的方法，从队列中删除 vc
+   */
   Que(UnixNetVConnection, keep_alive_queue_link) keep_alive_queue;
   uint32_t keep_alive_queue_size = 0;
+  /*
+   * 由上层状态机，如 HttpSM 等，通过 add_to_active_queue 将 vc 放入，用于实现 inactive timeout
+   * 在 InactivityCop 中，通过 manage_active_queue 来清理
+   * 另外还提供了 remove_from_active_queue 的方法，从队列中删除 vc
+   * 注意：active_queue 和 keep_alive_queue 是互斥的，一个 NetVC 不可以同时出现在这两个队列中，
+   * 这由 add_(keep_alive|active)_queue 保证.
+   */
   Que(UnixNetVConnection, active_queue_link) active_queue;
   uint32_t active_queue_size = 0;
+
+  /* 如上 8 个队列，其中 (read|write)_enable_list 两个队列是原子队列，可以不加锁直接操作，
+   * 其它六个队列   都需要加锁才能操作 */
 
   /// configuration settings for managing the active and keep-alive queues
   struct Config {

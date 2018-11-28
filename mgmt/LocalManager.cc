@@ -634,6 +634,7 @@ LocalManager::sendMgmtMsgToProcesses(MgmtMessageHdr *mh)
   switch (mh->msg_id) {
   case MGMT_EVENT_SHUTDOWN: {
     run_proxy = false;
+    /* 关闭所有打开的端口 */
     this->closeProxyPorts();
     break;
   }

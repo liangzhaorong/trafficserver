@@ -1391,6 +1391,7 @@ Vol::recover_data()
    Philosophy:  The idea is to find the region of disk that could be
    inconsistent and remove all directory entries pointing to that potentially
    inconsistent region.
+   理念：想法的找到可能不一致的磁盘区域，并删除指向该潜在的不一致区域的所有目录条目.
    Start from a consistent position (the write_pos of the last directory
    synced to disk) and scan forward. Two invariants for docs that were
    written to the disk after the directory was synced:

@@ -65,6 +65,7 @@ BaseManager::~BaseManager()
  *                MGMT_EVENT_SHUTDOWN  (graceful shutdown)
  *                MGMT_EVENT_RESTART   (graceful reboot)
  *                ...
+ * 该函数用于为各种管理事件注册回调函数，如 shutdown，re-init 等
  *
  *   Returns:   -1      on error(invalid event id passed in)
  *               or     value

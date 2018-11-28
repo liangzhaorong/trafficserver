@@ -51,6 +51,9 @@ ats_malloc(size_t size)
    * a MALLOC of a zero-sized item to work properly. Rather
    * than allocate any space, we simply return a nullptr to make
    * certain they die quickly & don't trash things.
+   * 在 libts 中有一些令人讨厌的代码，它期望 0 大小项的 MALLOC 可以正常工作。
+   * 我们仅仅是返回 nullptr 而不是分配任何空间，以确保它们快速死亡且不会丢弃
+   * 任何东西.
    */
 
   // Useful for tracing bad mallocs

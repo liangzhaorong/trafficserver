@@ -40,11 +40,15 @@ class ProxyMutex;
 
 /**
   Descriptor for an IO operation.
+  描述一个 IO 操作.
 
   A VIO is a descriptor for an in progress IO operation. It is
   returned from do_io_read() and do_io_write() methods on VConnections.
   Through the VIO, the state machine can monitor the progress of
   an operation and reenable the operation when data becomes available.
+  VIO 描述一个正在进行的 IO 操作。它是由 VConnections 里的 do_io_read() 和
+  do_io_write() 方法返回。通过 VIO，状态机可以监控到操作的进展，在数据到达时
+  可以激活操作。
 
   The VIO operation represents several types of operations, and
   they can be identified through the 'op' member. It can take any
@@ -70,12 +74,64 @@ class ProxyMutex;
   </table>
 
 */
+/*
+ * 理解 VIO
+ * 
+ * 状态机 SM 需要发起 IO 操作时，通过创建 VIO 来告知 IOCore，IOCore 在执行了物理 IO 操作后再通过 VIO 回调
+ * （通知）状态机 SM。所以 VIO 中包含了三个元素：BufferAccessor，VConnection，Cont(SM)
+ * 数据流在 BufferAccessor 与 VConnection 之间流动，消息流在 IOCore 与 Cont(SM)之间传递。
+ * 需要注意的是 VIO 里的 BufferAccessor 是指向 MIOBuffer 的操作者，MIOBuffer 是由 Cont(SM)创建的。
+ * 另外 IOCore 回调 Cont(SM)时，是通过 VIO 内保存的 _cont 指针进行的，不是通过 vc_server 里的 Cont
+ *
+ * +-------+                 +--------------------+    +-----------------------------------------+
+ * |       |  +-----------+  |                    |    |  +-----------+                          |
+ * |       |  |           |  |                    |    |  |           |                          |
+ * |       ===> vc_server ==========> read  ==============> MIOBuffer |                          |
+ * |       |  |           |  |                    |    |  |           |                          |
+ * |       |  +-----------+  |                    |    |  +-----------+                          |
+ * |       |                 |  vc->read.vio._cont----->handleEvent(READ_READY, &vc->read.vio)   |
+ * |       |                 |                    |    |                                         |
+ * |  NIC  |                 |       IOCore       |    |             VIO._Cont (SM)              |
+ * |       |  +-----------+  |                    |    |  +-----------+                          |
+ * |       |  |           |  |                    |    |  |           |                          |
+ * |       <=== vc_server <========== write <============== MIOBuffer |                          |
+ * |       |  |           |  |                    |    |  |           |                          |
+ * |       |  +-----------+  |                    |    |  +-----------+                          |
+ * |       |                 | vc->write.vio._cont----->handleEvent(WRITE_READY, &vc->write.vio) |
+ * |       |                 |                    |    |                                         |
+ * +-------+                 +--------------------+    +-----------------------------------------+
+ * 对于 TCP，这里的 IOCore 指的就是 NetHandler 和 UnixNetVConnection
+ * 
+ * 如，当状态机（SM）想要实现接收 1M 字节数据，并且转发给客户端时，可以通过如下方式实现：
+ * - 创建一个 MIOBuffer，用于存放临时接收的数据
+ * - 通过 do_io_read() 在 SourceVC 上创建一个读数据的 VIO，设置读取长度为 1M 字节，并传入 MIOBuffer 用于接收临时数据
+ * - IOCore 在 SourceVC 上接收到数据时会将数据生产到 VIO 中（暂存在 MIOBuffer 内）
+ *   - 然后呼叫 SM->handler(EVENT_READ_READY, SourceVIO)
+ *   - 在 handler 中可以对 SourceVIO 进行消费（读取 MIOBuffer 内暂存的数据），获取本次读取到的一部分数据
+ * - VIO 内有一个计数器，当总生产（读取）数据量达到 1M 字节
+ *   - 那么会由 IOCore 呼叫 SM->handler(EVENT_READ_COMPLETE, SourceVIO)
+ *   - 在 handler 中需要首先对 SourceVIO 进行消费（读出），然后关闭 SourceVIO.
+ * - 到此就完成了接收 1M 字节数据的过程
+ *
+ * 可以看到，ATS 通过 VIO 向 IOCore 描述一个包含若干次 IO 操作的任务，用于 VIO 操作的 MIOBuffer 可以很小，
+ * 仅需要保存一次 IO 操作所需要的数据，然后由 SM 对 VIO 和 MIOBuffer 进行处理.
+ * 或者，可以把 VIO 看做是一个 PIPE，一段是底层 IO 设备，一端是 MIOBuffer，一个 VIO 创建之前要选择好它的
+ * 方向，创建后不可修改，如：读 VIO，就是从底层 IO 设备(vc_server)读数据到 MIOBuffer；写 VIO，就是从 MIOBuffer
+ * 写数据到底层 IO 设备(vc_server)
+ */
 class VIO
 {
 public:
   ~VIO() {}
   /** Interface for the VConnection that owns this handle. */
+  /* 获得与此关联的 Continuation，返回成员：cont */
   Continuation *get_continuation();
+  /* 设置与此 VIO 关联的 Continuation（通常为状态机 SM），同时继承 Cont 的 mutex。
+   * 通过调用：vc_server->set_continuation(this, cont) 通知到与 VIO 关联的 VConnection。
+   *    - 这个 VConnection::set_continuation() 方法，随着 NT 的支持在 Yahoo 开源时被取消了，也就同时被废弃了
+   * 设置之后，当此 VIO 上发生事件时，将会回调新 Cont 的 handler，并传递 Event。
+   * 如果 cont == nullptr，那么将会同时清除 VIO 的 mutex，也会传递给 vc_server
+   */
   void set_continuation(Continuation *cont);
 
   /**
@@ -88,6 +144,7 @@ public:
 
   /**
     Determine the number of bytes remaining.
+    确定剩余的字节数.
 
     Convenience function to determine how many bytes the operation
     has remaining.

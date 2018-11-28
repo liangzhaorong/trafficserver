@@ -76,14 +76,19 @@ struct VolHeaderFooter {
   unsigned int magic;
   VersionNumber version;
   time_t create_time;
+  /* 当前磁盘写位置 */
   off_t write_pos;
+  /* 上次磁盘写位置 */
   off_t last_write_pos;
   off_t agg_pos;
   uint32_t generation; // token generation (vary), this cannot be 0
   uint32_t phase;
   uint32_t cycle;
+  /* 索引写回磁盘时，++sync_serial */
   uint32_t sync_serial;
+  /* 写 agg_buffer 至磁盘时，++write_serial */
   uint32_t write_serial;
+  /* 标志位，不为 0 表示当前目录脏了，需要将当前目录中脏的数据同步到磁盘中 */
   uint32_t dirty;
   uint32_t sector_size;
   uint32_t unused; // pad out to 8 byte boundary

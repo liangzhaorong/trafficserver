@@ -1541,6 +1541,7 @@ main(int /* argc ATS_UNUSED */, const char **argv)
   pcre_free   = ats_free;
 
   // Verify system dependent 'constants'
+  /* 验证系统依赖的常量，该函数为空 */
   check_system_constants();
 
   // Define the version info

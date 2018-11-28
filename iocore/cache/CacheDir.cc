@@ -931,6 +931,7 @@ dir_entries_used(Vol *d)
  * this function flushes the cache meta data to disk when
  * the cache is shutdown. Must *NOT* be used during regular
  * operation.
+ * 当缓存关闭时该函数用于将缓存元数据刷新到磁盘中。必须在常规操作中使用 *NOT*
  */
 
 void
@@ -946,13 +947,20 @@ sync_cache_dir_on_shutdown()
     // the process is going down, do a blocking call
     // dont release the volume's lock, there could
     // be another aggWrite in progress
+    /* 进程将要关闭时，执行阻塞调用不要释放卷的锁定，可能
+     * 还有另一个 aggWrite 正在执行.
+     */
     MUTEX_TAKE_LOCK(gvol[i]->mutex, t);
     Vol *d = gvol[i];
 
+    /* 检测磁盘是否坏了，若坏了，则忽略该磁盘，继续下一个
+     * 检测记录的磁盘错误次数是否大于cache_config_max_disk_errors默认指定的值:5
+     */
     if (DISK_BAD(d->disk)) {
       Debug("cache_dir_sync", "Dir %s: ignoring -- bad disk", d->hash_text.get());
       continue;
     }
+    /* 获取脏数据的长度 */
     size_t dirlen = d->dirlen();
     ink_assert(dirlen > 0); // make clang happy - if not > 0 the vol is seriously messed up
     if (!d->header->dirty && !d->dir_sync_in_progress) {
@@ -1029,6 +1037,7 @@ sync_cache_dir_on_shutdown()
   }
 }
 
+/* CacheSync 这个 Continuation 会不定期被调用将索引写回磁盘 */
 int
 CacheSync::mainEvent(int event, Event *e)
 {
@@ -1100,7 +1109,10 @@ Lrestart:
          clean directory to disk is also the cause of INKqa07151. Increasing
          the serial serial causes the cache to recover more data
          than necessary.
+         如果目录没有脏，则不同步目录到磁盘中。将干净的目录同步到磁盘中也是 INKqa07151
+         的引起的。增加 serial 序号也会导致缓存恢复超出必要的数据。
          The dirty bit it set in dir_insert, dir_overwrite and dir_delete_entry
+         该 dirty 标志位是在 dir_insert，dir_overwrite 和 dir_delete_entry 中设置的
        */
       if (!vol->header->dirty) {
         Debug("cache_dir_sync", "Dir %s not dirty", vol->hash_text.get());
@@ -1115,6 +1127,7 @@ Lrestart:
         return EVENT_CONT;
       }
       Debug("cache_dir_sync", "pos: %" PRIu64 " Dir %s dirty...syncing to disk", vol->header->write_pos, vol->hash_text.get());
+      /* 在将脏的目录同步到磁盘后，将该标志位重置为 0，表示目录没有脏 */
       vol->header->dirty = 0;
       if (buflen < dirlen) {
         if (buf) {

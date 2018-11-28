@@ -37,6 +37,8 @@ namespace jearena
  * An allocator which uses Jemalloc to create an dedicated arena to allocate
  * memory from. The only special property set on the allocated memory is that
  * the memory is not dump-able.
+ * 一个分配器，它使用 Jemalloc 创建一个专用的区域来分配内存。在分配的内存上设置
+ * 唯一特殊属性标记该内存是不可转储的。
  *
  * This is done by setting MADV_DONTDUMP using the `madvise` system call. A
  * custom hook installed which is called when allocating a new chunk / extent of
@@ -46,14 +48,22 @@ namespace jearena
  * different arenas, without `munmap`-ing them first, and the advises are not
  * sticky i.e. they are unset if `munmap` is done. Also this arena can't be used
  * by any other part of the code by just calling `malloc`.
+ * 这是通过使用 `madvise` 系统调用设置 MADV_DONTDUMP 来完成的。安装了自定义 hook，
+ * 以便在分配新的 chunk/内存范围时调用。它所做的只是调用原始的 jemalloc hook 来分配
+ * 内存，然后在将指针返回到已分配内存之前设置它。Jemalloc 不会在不同的 arenas（区域，场所）
+ * 中使用已分配的块/extent，而不首先对它们进行 `munmap`，并且建议是不 sticky（沾）的。
  *
  * If target system doesn't support MADV_DONTDUMP or jemalloc doesn't support
  * custom arena hook, JemallocNodumpAllocator would fall back to using malloc /
  * free. Such behavior can be identified by using
  * !defined(JEMALLOC_NODUMP_ALLOCATOR_SUPPORTED).
+ * 如果目标系统不支持 MADV_DONTDUMP 或者 jemalloc 不支持自定义区域hook，JemallocNodumpAllocator
+ * 将回退到使用 malloc/free。可以使用 !defined(JEMALLOC_NODUMP_ALLOCATOR_SUPPORTED) 
+ * 来识别此类行为.
  *
  * Similarly, if binary isn't linked with jemalloc, the logic would fall back to
  * malloc / free.
+ * 同样的，如果二进制程序没有和 jemalloc 链接，则逻辑将回退到 malloc/free.
  */
 class JemallocNodumpAllocator
 {
