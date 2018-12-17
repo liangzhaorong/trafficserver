@@ -1549,6 +1549,7 @@ main(int /* argc ATS_UNUSED */, const char **argv)
 
   runroot_handler(argv);
   // Before accessing file system initialize Layout engine
+  /* 在访问文件系统之前初始化 Layout 引擎 */
   Layout::create();
   // Let's be clear on what exactly is starting up.
   printf("Traffic Server " PACKAGE_VERSION BUILD_NUMBER " " __DATE__ " " __TIME__ " " BUILD_MACHINE "\n");

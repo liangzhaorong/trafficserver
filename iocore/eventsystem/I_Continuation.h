@@ -107,6 +107,11 @@ public:
     - 可以通过以下方法来设置/改变（头文件内定义了两个宏）：
       - SET_HANDLER(_h)
       - SET_CONTINUATION_HANDLER(_c, _h)
+
+  Continuation，从学术上应该是叫做 Continuation 的编程模型（方法），这个技术相当古老，
+  后来微软围绕这个方案，改进出了 coroutine 的编程模型（方法），一定程度上来讲 Continuation 
+  是整个异步回调机制的多线程事件编程基础。对应 ATS 中，Continuation 是一个最最基础的抽象
+  结构，后续的所有高级结构，如 Action Event VC 等都封装 Continuation 数据结构.
 */
 
 class Continuation : private force_VFPT_to_top

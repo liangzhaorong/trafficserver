@@ -150,6 +150,7 @@ ink_hash_table_isbound(InkHashTable *ht_ptr, const char *key)
   This routine takes a hash table <ht_ptr>, a key <key>, and stores the
   value bound to the key by reference through <value_ptr>.  If no binding is
   found, 0 is returned, else 1 is returned.
+  该 rontine 采用哈希表 <ht_ptr>，一个 key <key>，并通过 <value_tr> 引用
 
  *---------------------------------------------------------------------------*/
 

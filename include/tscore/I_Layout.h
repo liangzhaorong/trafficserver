@@ -35,6 +35,7 @@
 
 /**
   The Layout is a simple place holder for the distribution layout.
+  Layout 是 distribution layout（分布布局）的简单占位符.
 
  */
 struct Layout {
@@ -44,6 +45,8 @@ struct Layout {
   /**
    Setup the runroot for layout class
    Return true if runroot is setup succesfully and false if runroot is not used
+   为 layout 类设置运行时根目录.
+   如果 runroot 设置成功返回 true，否则返回 false.
    */
   bool runroot_setup();
 
@@ -74,6 +77,7 @@ struct Layout {
    Creates a Layout Object with the given prefix.  If no
    prefix is given, the prefix defaults to the one specified
    at the compile time.
+   通过给定的前缀创建一个 Layout 对象。如果没有指定前缀，则在编译时默认指定一个.
   */
   static void create(std::string_view const prefix = {});
 
